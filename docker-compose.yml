@@ -1,0 +1,24 @@
+services:
+  # Gateway mode. Client ID and secret arrive per request on X-Printix-* headers.
+  # Leave PRINTIX_CLIENT_ID, PRINTIX_CLIENT_SECRET, and env_file unset so the
+  # container has no static vendor credentials. The project .env is used only
+  # for Compose interpolation of CONDUIT_S2S_SECRET. For AUTH_MODE=env, pass
+  # PRINTIX_CLIENT_ID and PRINTIX_CLIENT_SECRET on that process instead
+  # (see the README).
+  printix-mcp:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - MCP_TRANSPORT=http
+      - MCP_HTTP_PORT=8080
+      - MCP_HTTP_HOST=0.0.0.0
+      - AUTH_MODE=gateway
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CONDUIT_S2S_SECRET=${CONDUIT_S2S_SECRET:?set CONDUIT_S2S_SECRET}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
