@@ -126,6 +126,8 @@ afterEach(async () => {
   while (servers.length > 0) {
     await closeServer(servers.pop());
   }
+  // Drop fetch stubs even when startHttpTransport() rejects before a test's own finally.
+  vi.unstubAllGlobals();
 });
 
 afterAll(() => {
