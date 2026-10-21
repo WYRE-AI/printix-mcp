@@ -50,6 +50,13 @@ In `AUTH_MODE=gateway`, `/mcp` also requires `X-Printix-Client-ID` and `X-Printi
 
 In `AUTH_MODE=env` (single-tenant HTTP), `/mcp` still requires a valid `X-Gateway-S2S` header. Vendor credentials come from `PRINTIX_CLIENT_ID` and `PRINTIX_CLIENT_SECRET`.
 
+### Request limits
+
+- HTTP request bodies are capped at 256 KiB (262144 bytes). After the `X-Gateway-S2S` check passes, a `Content-Length` above the cap returns 413 with a JSON-RPC error; bodies without `Content-Length` are capped by the MCP SDK transport. Unauthenticated requests still get 401 first.
+- `tools/call` arguments are capped at 10,000 elements (every array item and object key at any depth). Larger inputs return an `isError` tool result and are never dispatched.
+
+These limits address CVE-2026-111768 / GHSA-46jr-4wx8-v453 (memory exhaustion during validation) and GHSA-f897-62hf-6gxq (no request body / batch cap).
+
 ## Tools
 
 ### Tenant
