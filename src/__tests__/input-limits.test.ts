@@ -61,10 +61,8 @@ describe('countToolInputElements', () => {
   });
 
   it('builds the McpServer-compatible error result', () => {
-    expect(toolInputTooLargeResult('t')).toEqual({
-      content: [
-        { type: 'text', text: 'Invalid arguments for tool t: arguments contain more than the maximum of 10000 elements' },
-      ],
+    expect(toolInputTooLargeResult()).toEqual({
+      content: [{ type: 'text', text: 'Tool input exceeds the maximum of 10000 elements' }],
       isError: true,
     });
   });
@@ -87,7 +85,7 @@ function s2s(): string {
   return `${message},v1=${createHmac('sha256', S2S_SECRET).update(message).digest('hex')}`;
 }
 
-function post(port: number, headers: Record<string, string>, body: string) {
+function post(port: number, headers: Record<string, string>, body: string, chunked = false) {
   return new Promise<{ status: number; body: string }>((resolve, reject) => {
     const req = httpRequest(
       {
@@ -98,7 +96,9 @@ function post(port: number, headers: Record<string, string>, body: string) {
         headers: {
           'content-type': 'application/json',
           accept: 'application/json, text/event-stream',
-          'content-length': String(Buffer.byteLength(body)),
+          ...(chunked
+            ? { 'transfer-encoding': 'chunked' }
+            : { 'content-length': String(Buffer.byteLength(body)) }),
           ...headers,
         },
       },
@@ -110,7 +110,12 @@ function post(port: number, headers: Record<string, string>, body: string) {
     );
     req.setTimeout(5000, () => req.destroy(new Error('timeout')));
     req.on('error', reject);
-    req.end(body);
+    if (chunked) {
+      req.write(body);
+      req.end();
+    } else {
+      req.end(body);
+    }
   });
 }
 
@@ -154,6 +159,30 @@ describe('HTTP request limits', () => {
       error: { code: -32600, message: 'Request body exceeds 262144 bytes' },
       id: null,
     });
+  });
+
+  it('returns 413 for an oversized chunked body with valid S2S', async () => {
+    const port = await listen();
+    const res = await post(port, { 'x-gateway-s2s': s2s() }, OVERSIZED, true);
+    expect(res.status).toBe(413);
+    // No Content-Length, so the SDK transport (maxRequestBodySize) rejects it with its own body.
+    const parsed = JSON.parse(res.body);
+    expect(parsed.jsonrpc).toBe('2.0');
+    expect(parsed.error.message).toContain('262144');
+  });
+
+  it('returns 401 (not 413) in gateway mode when credentials are missing', async () => {
+    process.env.AUTH_MODE = 'gateway';
+    const port = await listen();
+    const res = await post(port, { 'x-gateway-s2s': s2s() }, OVERSIZED);
+    expect(res.status).toBe(401);
+    expect(res.body).toContain('X-Printix-Client-ID');
+    const withCreds = await post(
+      port,
+      { 'x-gateway-s2s': s2s(), 'x-printix-client-id': 'a', 'x-printix-client-secret': 'b' },
+      OVERSIZED,
+    );
+    expect(withCreds.status).toBe(413);
   });
 
   it('still returns 401 for oversized bodies with missing or invalid S2S', async () => {
@@ -201,6 +230,7 @@ describe('HTTP request limits', () => {
     const result = JSON.parse(res.body).result;
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('maximum of 10000 elements');
+    expect(result.content[0].text).not.toContain('printix_list_groups');
     expect(dispatchMock).not.toHaveBeenCalled();
 
     // Positive control: a small call does reach the dispatcher.
