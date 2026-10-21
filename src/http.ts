@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createServer } from './server.js';
 import { runWithCredentials } from './client.js';
 import { logger } from './utils/logger.js';
+import { MAX_REQUEST_BODY_BYTES } from './input-limits.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
 
 // Public example values. A copied placeholder must not verify as a real secret.
@@ -157,6 +158,36 @@ export async function startHttpTransport(): Promise<HttpServer> {
       return;
     }
 
+    // Gateway mode: the vendor credential presence check also precedes the body
+    // cap, so a request without credentials gets 401 rather than 413.
+    // Do not fall through to process.env. In gateway mode that would let
+    // any caller who reached this process use the container's credentials.
+    let gatewayCredentials: { clientId: string; clientSecret: string } | undefined;
+    if (isGatewayMode) {
+      const clientId = credentialHeader(req.headers['x-printix-client-id']);
+      const clientSecret = credentialHeader(req.headers['x-printix-client-secret']);
+      if (!clientId || !clientSecret) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(GATEWAY_CREDENTIALS_UNAUTHORIZED));
+        return;
+      }
+      gatewayCredentials = { clientId, clientSecret };
+    }
+
+    // Body cap runs only after S2S and credential checks so unauthenticated callers still get 401.
+    const contentLength = Number(firstHeader(req.headers['content-length']));
+    if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32600, message: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes` },
+          id: null,
+        }),
+      );
+      return;
+    }
+
     const handle = async () => {
       // SECURITY-CRITICAL invariant: this transport MUST stay stateless
       // (sessionIdGenerator: undefined + enableJsonResponse: true).
@@ -170,6 +201,7 @@ export async function startHttpTransport(): Promise<HttpServer> {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
+        maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
       });
       res.on('close', () => {
         transport.close();
@@ -179,17 +211,8 @@ export async function startHttpTransport(): Promise<HttpServer> {
       await transport.handleRequest(req, res);
     };
 
-    if (isGatewayMode) {
-      const clientId = credentialHeader(req.headers['x-printix-client-id']);
-      const clientSecret = credentialHeader(req.headers['x-printix-client-secret']);
-      // Do not fall through to process.env. In gateway mode that would let
-      // any caller who reached this process use the container's credentials.
-      if (!clientId || !clientSecret) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(GATEWAY_CREDENTIALS_UNAUTHORIZED));
-        return;
-      }
-      await runWithCredentials({ clientId, clientSecret }, handle);
+    if (gatewayCredentials) {
+      await runWithCredentials(gatewayCredentials, handle);
       return;
     }
 
